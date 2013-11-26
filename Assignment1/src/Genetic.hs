@@ -7,14 +7,11 @@ import Control.Monad.Random
 import Data.Random.Extras
 import Data.Maybe (fromJust)
 import Data.RVar (sampleRVar)
-import Data.Random.Distribution.Uniform
-import Data.Random (Distribution)
 import qualified Data.Vector as V
 import Data.Vector (Vector)
+import qualified Data.Random.Internal.Source as I
 
 data Operation = Mutate | Crossover deriving (Enum)
-
-instance Distribution StdUniform Operation where
 
 data Env m = Env{
   crossover :: Vector Int -> m (Vector Int),
@@ -54,9 +51,9 @@ flipBits bits n = do
 
 mutateDefault bits = numBits >>= flipBits bits 
 
-defSel :: MonadRandom m => m Operation
-defSel = liftM toEnum $ getRandomR (0,1 :: Int)
-  
+defSel :: I.MonadRandom m => m Operation
+defSel = sampleRVar $ choice [Crossover,Mutate]
+          
 tournamentN' num s vs = liftM fst $ foldM chooseFun ([],vs) [1..num]
   where
     chooseFun (sel,opts) _ = do
@@ -71,22 +68,20 @@ uniformCrossover p = V.mapM $ \e -> do
            then flipInt e
            else e
 
--- performOperation :: Monad m => Env m -> Operation -> [[Int]] -> m [[Int]]
 performOperation env op gen = do
   elems <- liftM (map maxGen) $ tournament env gen
   newGen <- liftM (maximumBy cmpGen) $ mapM operate elems
   case cmpGen newGen worse of
-    LT -> return $ (False,worse : rest)
-    EQ -> return $ (True,newGen : rest)
-    GT -> return $ (True,newGen : rest)
+    LT -> return (False,worse : rest)
+    _ -> return (True,newGen : rest)
     
   where
     (g:gs) = gen
     (worse,rest) = foldl (\(e,es) x ->
                            case cmpGen x e of
-                             LT -> (x,e:es)
-                             EQ -> (x,e:es)
-                             GT -> (e,x:es)) (g,[]) gs
+                             GT -> (e,x:es)
+                             _ -> (x,e:es)) (g,[]) gs
+                   
     cmpGen x y = compare (fitness env x) (fitness env y)
     maxGen = maximumBy cmpGen
     operate e =
