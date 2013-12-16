@@ -1,7 +1,7 @@
-{-# Language Rank2Types,MultiParamTypeClasses,ScopedTypeVariables,GADTs,RecordWildCards, NoMonomorphismRestriction #-}
+{-# Language Rank2Types,MultiParamTypeClasses,ScopedTypeVariables,GADTs,RecordWildCards, KindSignatures #-}
 module Main where
 
-import Data.List (maximumBy)
+import Data.List (maximumBy,findIndex)
 import Control.Monad
 import Control.Monad.Random
 import Data.Random.Extras
@@ -23,6 +23,7 @@ import Control.Monad.Trans.State
 import Control.Monad.Trans (lift)
 import Prelude hiding (iterate)
 import Graphics.Gnuplot.Simple
+import System.Environment (getArgs,getProgName)
 
 data Operation = Mutate | Crossover deriving (Enum)
 
@@ -42,16 +43,16 @@ findStrongest gen = maximumByWithIx compareGen $ genMembers gen
 
 findWeakest gen = minimumByWithIx compareGen $ genMembers gen 
 
-data Env m a where
-  Env{
+data Env (m :: * -> *) a where
+  Env :: (MonadRandom m, I.MonadRandom m) => {
     crossover :: [Vector a] -> m [Vector a],
     mutate :: Vector a -> m (Vector a),
-    tournament :: forall a . Vector a -> m [Vector a],
+    tournament :: forall x . Vector x -> m [Vector x],
     fitness :: (Vector a) -> Double,
     selOperation :: m Operation,
     target :: Vector a
                     
-  } :: Env m a
+  } -> Env m a
 
 numBits :: MonadRandom m => m Integer 
 numBits = numBits' 1
@@ -197,7 +198,7 @@ twoPointCrossover sigFact v1 v2'
     iN' <- sampleRVar $ rvar $ Normal vMean vSig :: m Double
     let
       iN = i0 + fit 0 v1Len (round iN') :: Int
-      rep = V.fromList [(i `mod` v1Len, v2 V.! (i `mod` v1Len)) | i <- [i0 .. iN]]
+      rep = V.fromList [(i `mod` v1Len, v2 V.! (i `mod` v2Len)) | i <- [i0 .. iN]]
     return $ V.update v1 rep
     
   where
@@ -267,21 +268,26 @@ minimumByWithIx cmp v =
       | cmp x x' == GT = (ix',x')
       | otherwise = (ix,x)
 
--- sumEnvironment c t = Env{
---   crossover = c,
---   tournament = t,
---   mutate = mutateDefault,
---   fitness = fromIntegral . V.sum,
---   selOperation = defSel
---   }
+sumEnv :: (MonadRandom m,I.MonadRandom m) => Env m Int
+sumEnv = Env{
+  crossover = twoPointCrossoverAll 2.0,
+  tournament = tournamentN 2 2,
+  mutate = mutateDefault,
+  fitness = fromIntegral . V.sum,
+  selOperation = defSel,
+  target = V.replicate 100 1
+  }
 
--- trapRandomized :: (I.MonadRandom m,MonadRandom m) => Env m Int
--- trapRandomized :: Env IO Int
+scaledSumEnv :: (MonadRandom m,I.MonadRandom m) => Env m Int
+scaledSumEnv = sumEnv{
+  fitness = V.ifoldl (\s i x -> fromIntegral (i * x) + s) 0
+  }
+                   
 trapRandomized = Env{
   mutate = mutateDefault,
   crossover = twoPointCrossoverAll 2.0,
   tournament = tournamentN 2 2,
-  fitness = (ungroupedTrapFunction trapMapping 4 2),
+  fitness = (ungroupedTrapFunction trapMapping 4 1),
   selOperation = defSel,
   target = V.replicate 100 1
 }
@@ -387,19 +393,63 @@ plotDeceptiveTrapFunctionOrd  = plotTrapFunction title env
     env tSize pC = trapRandomized{
       tournament = tournamentN 2 tSize,
       selOperation = selFun pC,
-      fitness = trapFunction 4 2
+      fitness = trapFunction 4 1
     }
+
+plotTrapFunctionOrd  = plotTrapFunction title env 
+  where
+    title tSize pc' = "Trap Function: "
+                      ++ " (Tournament: " ++ show tSize
+                      ++ ", P-Crossover: " ++ (show pc') ++ ")"
+    env tSize pC = trapRandomized{
+      tournament = tournamentN 2 tSize,
+      selOperation = selFun pC,
+      fitness = trapFunction 4 2.5
+    }
+
+plotTrapFunctionRand  = plotTrapFunction title env 
+  where
+    title tSize pc' = "Randomized Trap Function: "
+                      ++ " (Tournament: " ++ show tSize
+                      ++ ", P-Crossover: " ++ (show pc') ++ ")"
+    env tSize pC = trapRandomized{
+      tournament = tournamentN 2 tSize,
+      selOperation = selFun pC,
+      fitness = (ungroupedTrapFunction trapMapping 4 2.5)
+    }
+
+
+plotSumFunction = plotTrapFunction title env
+  where
+    title tSize pc' = "Sum Function: "
+                      ++ " (Tournament: " ++ show tSize
+                      ++ ", P-Crossover: " ++ (show pc') ++ ")"
+    env tSize pC = sumEnv{
+      tournament = tournamentN 2 tSize,
+      selOperation = selFun pC
+    }
+
+plotScaledSumFunction = plotTrapFunction title env
+  where
+    title tSize pc' = "Scaled Sum Function: "
+                      ++ " (Tournament: " ++ show tSize
+                      ++ ", P-Crossover: " ++ (show pc') ++ ")"
+    env tSize pC = scaledSumEnv{
+      tournament = tournamentN 2 tSize,
+      selOperation = selFun pC
+    }
+    
 
 -- | Utility function that generates plots from running
 -- the given experiment with different parameters several
 -- times with multiple generation sizes
-plotTrapFunction titleF env = mapM_ makePlot params
+plotTrapFunction titleF env iters fact = mapM_ makePlot params
   where
     params = [(pC,tSize) | pC <- [0,1%2,1], tSize <- [1,2]]
     makePlot :: (Ratio Integer,Int) -> IO ()
     makePlot (pC,tSize) = do
       let
-        gens = [i*30 | i <- [1..10]] :: [Integer]
+        gens = [i*fact | i <- [1..iters]] :: [Integer]
         pc' = showRat pC :: Double
         title = titleF tSize pc'
       res <- iterate (\i -> (env tSize pC,i)) 10 gens
@@ -415,10 +465,82 @@ plotTrapFunction titleF env = mapM_ makePlot params
         p3Line = ps{
           lineSpec=CustomStyle [LineTitle "Mean Number Iterations"]
         }
-        plotF attrs vals = plotListStyle [Title title] attrs vals
-      plotF p1Line p1
-      plotF p2Line p2
-      plotF p3Line p3
+        plotF attrs vals label = 
+          plotListStyle [Title title,YLabel label,XLabel "Number of Generations"] attrs vals
+      plotF p1Line p1 "Success Percentage"
+      plotF p2Line p2 "Fitness"
+      plotF p3Line p3 "Iterations"
      
+plots = zip [1..] [
+  (plotDeceptiveTrapFunctionRandomized,"Randomized Deceptive Trap Function")
+  ,(plotDeceptiveTrapFunctionOrd,"Deceptive Trap Function")
+  ,(plotTrapFunctionOrd,"Trap Function")
+  ,(plotTrapFunctionRand,"Randomized Trap Function")
+  ,(plotSumFunction,"Sum Function")
+  ,(plotScaledSumFunction,"Scaled Sum Function")
+  ]
 
-main = return ()
+
+executePlots numsStr iters fact =
+  mapM_ executePlot nums
+  where
+    nums = map (\x -> fromEnum x - fromEnum '0') numsStr
+    executePlot i =
+      case lookup i plots of
+        Just (f',_) -> f' iters fact
+        Nothing -> putStrLn $ "The index " ++ show i ++ " is not a valid plot."
+
+help = do
+  name <- getProgName
+  let
+    txt = concat [
+      "Genetic Programming Assignment:",
+      "\n\tUsage: ",name," [args]\n",
+      "\nValid arguments [args]:\n",
+      "\t --help \tPrint this screen\n",
+      "\t -i {Num} \tNumber of experiments\n",
+      "\t -f {Num} \tGeneration Size Factor\n",
+      "\t\t\tThe generation size at iteration i is i*f\n",
+      "\t -p {Nums} \tThe desired plots as a list of integers\n",
+      "\t\t\tThe valid plots are:\n"
+      ]
+          ++ concatMap (\(i,(_,n)) -> "\t\t\t* "++ (show i) ++ " " ++ n ++ "\n") plots
+          ++ concat ["\n\nExample: ",name," -i 5 -m 10 -p 134"]
+  putStrLn txt
+
+getArg a = do
+  args <- getArgs
+  let
+    v = do
+      i <- findIndex (== a) args
+      case length args of
+        l | l > i+1 -> Just $ args !! (i+1)
+        _ -> Nothing
+  case v of
+    Just v -> return $ Just v
+    Nothing -> return Nothing
+
+getArgOrFail arg = do
+  a <- getArg arg
+  case a of
+    Just a' | length a' > 0 -> return a'
+    _ -> do
+      help
+      error $ "Could not find argument: " ++ arg
+
+operation = do
+  it <- liftM read $ getArgOrFail "-i"
+  f <- liftM read $ getArgOrFail "-f"
+  p <- getArg "-p"
+  case p of
+    Nothing | it > 0 && f > 0 -> executePlots ['1'..'6'] it f
+    Just ps | it > 0 && f >0 -> executePlots ps it f
+    _ -> do
+      help
+      error $ "The given parameters are not valid."
+
+main = do
+  h <- liftM (findIndex (== "--help")) getArgs
+  case h of
+    Nothing -> operation
+    Just _ -> help
