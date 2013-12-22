@@ -24,6 +24,10 @@ import Control.Monad.Trans (lift)
 import Prelude hiding (iterate)
 import Graphics.Gnuplot.Simple
 import System.Environment (getArgs,getProgName)
+import Control.Applicative
+import System.FilePath
+import Control.Concurrent.Async (wait,async)
+import System.Mem
 
 data Operation = Mutate | Crossover deriving (Enum)
 
@@ -141,13 +145,19 @@ tournamentN' num s vs = liftM fst $ foldM chooseFun ([],vs) [1..num]
 
 tournamentN num s vs = tournamentN' num s vs
 
-uniformCrossoverVector p = V.mapM $ \e -> do
-  mustFlip <- liftM (p>) $ getRandomR (0,1)
-  return $ if mustFlip
-           then flipInt e
-           else e
+uniformCrossoverVector p (v1,v2) = V.mapM selector $ V.zip v1 v2 
+  where
+    selector (a,b) = do
+      mustFlip <- liftM (p>) $ getRandomR (0,1)
+      return $ if mustFlip then a else b
 
-uniformCrossover p = mapM (uniformCrossoverVector p) 
+
+pairs (x:y:xs) = (x,y) : pairs xs
+pairs (x:_) = [(x,x)]
+pairs _ = []
+
+uniformCrossover :: (MonadRandom m,I.MonadRandom m, Num a, Eq a) => Double -> [Vector a] -> m [Vector a]
+uniformCrossover p vs = mapM (uniformCrossoverVector p) $ pairs vs 
 
 unGroupTrap mapping v = V.map (\i -> v V.! i) mapping
 
@@ -205,7 +215,7 @@ twoPointCrossover sigFact v1 v2'
     v1Len = V.length v1 :: Int
     v2Len = V.length v2'
     v2 = V.generate v1Len (\i -> v2' V.! (i `mod` v2Len)) 
-    vMid = v1Len `div` 2
+    vMid = v1Len `div` 4
     vMean = fromIntegral vMid :: Double
     vSig = fromIntegral vMid / sigFact :: Double
 
@@ -360,20 +370,26 @@ iterate _ _ [] = return []
 iterate next rep (i:is) = do
   let
     (env,size) = next i
-  (_,(succC,sFt,sIters)) <- flip runStateT (0,0,0) $ mapM_ (const $ iteration env size) [1..rep] 
+  runs <- mapM (const $ async $ flip runStateT (0,0,0) $ iteration env size) [1..rep]
+  (succC,sFt,sIters) <- foldM cata (0,0,0) runs
   let
     repR = fromIntegral rep
     mSucc = fromIntegral succC / repR
     mFt = sFt / repR
     mIters = fromIntegral sIters / repR
-  liftM ((i,(mSucc,mFt,mIters)) :) $ iterate next rep is
+  v <- liftM ((i,(mSucc,mFt,mIters)) :) $ iterate next rep is
+  performGC
+  return v
+  where
+    cata (succC,sFt,sIters) as = do
+      (_,(succ,ft,iters)) <- wait as
+      return (succC + succ,ft + sFt, iters + sIters)
 
 -- | Fucntion used to group the results from running
 -- an experiment multiple ti
-collector elems = foldr cata ([],[],[]) elems
+collector elems = foldr cata ([],[],[],[],[]) elems
   where
-    cata (i,(x,y,z)) (xs,ys,zs) = ((i,x):xs,(i,y):ys,(i,z):zs)
-
+    cata (i,(x,y,z)) (xs,ys,zs,its,succIts) = ((i,x):xs,(i,y):ys,(i,z):zs,(z,y):its,(z,x):succIts)
 
 plotDeceptiveTrapFunctionRandomized  = plotTrapFunction title env 
   where
@@ -443,33 +459,47 @@ plotScaledSumFunction = plotTrapFunction title env
 -- | Utility function that generates plots from running
 -- the given experiment with different parameters several
 -- times with multiple generation sizes
-plotTrapFunction titleF env iters fact = mapM_ makePlot params
+plotTrapFunction titleF env iters fact dir fName' = 
+  mapM_ makePlot params
   where
     params = [(pC,tSize) | pC <- [0,1%2,1], tSize <- [1,2]]
     makePlot :: (Ratio Integer,Int) -> IO ()
     makePlot (pC,tSize) = do
       let
+        fName = fName' ++ "_"++(show pC)++"_"++(show tSize)
+        conds = [
+          (True,(env,"Two Point Crossover"))
+          ,(pC>0,(\x y -> (env x y){crossover = uniformCrossover 0.5},"Uniform Crossover (P-Flip: 0.5)"))
+           ,(pC>0,(\x y -> (env x y){crossover = mapM mutateDefault >=> twoPointCrossoverAll 2.0},"Randomized Two Point Crossover")) 
+          ]
         gens = [i*fact | i <- [1..iters]] :: [Integer]
         pc' = showRat pC :: Double
         title = titleF tSize pc'
-      res <- iterate (\i -> (env tSize pC,i)) 10 gens
-      let
+        cata (p1,p2,p3,p4,p5) (exec,(envI,name))
+          | exec = do
+            (p1',p2',p3',p4',p5') <- liftM collector $ iterate (\i -> (envI tSize pC,i)) 30 gens
+            return $ ((p1Line name,p1') : p1,(p2Line name,p2') : p2,(p3Line name,p3') : p3,(p2Line (name ++ " (Its)"),p4') : p4,(p1Line (name ++ " (Its)"),p5') : p5)
+          | otherwise = return (p1,p2,p3,p4,p5)
+          
         ps = PlotStyle{plotType=Lines,lineSpec=DefaultStyle 1} 
-        (p1,p2,p3) = collector res
-        p1Line = ps{
-          lineSpec = CustomStyle [LineTitle "Successful Runs"]
+        p1Line n = ps{
+          lineSpec = CustomStyle [LineTitle $ "Successful Runs (" ++ n ++ ")"]
         }
-        p2Line = ps{
-          lineSpec=CustomStyle [LineTitle "Mean Fitness"]
+        p2Line n = ps{
+          lineSpec=CustomStyle [LineTitle $ "Mean Fitness (" ++ n ++ ")"]
         }
-        p3Line = ps{
-          lineSpec=CustomStyle [LineTitle "Mean Number Iterations"]
+        p3Line n = ps{
+          lineSpec=CustomStyle [LineTitle $ "Mean Number Iterations (" ++ n ++ ")"]
         }
-        plotF attrs vals label = 
-          plotListStyle [Title title,YLabel label,XLabel "Number of Generations"] attrs vals
-      plotF p1Line p1 "Success Percentage"
-      plotF p2Line p2 "Fitness"
-      plotF p3Line p3 "Iterations"
+        plotFGen xLabel vals label adj = 
+          plotListsStyle [Title title,YLabel label,XLabel xLabel,PNG $ dir </> (fName ++ adj ++ ".png")] vals
+        plotF = plotFGen "Generation Size"
+      (p1,p2,p3,p4,p5) <- foldM cata ([],[],[],[],[]) conds
+      plotF p1 "Success Percentage" "_1"
+      plotF p2 "Fitness" "_2"
+      plotF p3 "Iterations" "_3"
+      plotListsStyle [Title title,YLabel "Fitness",XLabel "Iterations", PNG $ dir </> (fName ++ "_4.png")] p4
+      plotListsStyle [Title title,YLabel "Success Percentage",XLabel "Iterations", PNG $ dir </> (fName ++ "_5.png")] p5
      
 plots = zip [1..] [
   (plotDeceptiveTrapFunctionRandomized,"Randomized Deceptive Trap Function")
@@ -481,13 +511,13 @@ plots = zip [1..] [
   ]
 
 
-executePlots numsStr iters fact =
+executePlots numsStr out iters fact =
   mapM_ executePlot nums
   where
     nums = map (\x -> fromEnum x - fromEnum '0') numsStr
     executePlot i =
       case lookup i plots of
-        Just (f',_) -> f' iters fact
+        Just (f',n) -> f' iters fact out n 
         Nothing -> putStrLn $ "The index " ++ show i ++ " is not a valid plot."
 
 help = do
@@ -500,6 +530,7 @@ help = do
       "\t --help \tPrint this screen\n",
       "\t -i {Num} \tNumber of experiments\n",
       "\t -f {Num} \tGeneration Size Factor\n",
+      "\t -d {Dir} \tOutput Directory (Must Exist)",
       "\t\t\tThe generation size at iteration i is i*f\n",
       "\t -p {Nums} \tThe desired plots as a list of integers\n",
       "\t\t\tThe valid plots are:\n"
@@ -532,9 +563,9 @@ operation = do
   it <- liftM read $ getArgOrFail "-i"
   f <- liftM read $ getArgOrFail "-f"
   p <- getArg "-p"
-  case p of
-    Nothing | it > 0 && f > 0 -> executePlots ['1'..'6'] it f
-    Just ps | it > 0 && f >0 -> executePlots ps it f
+  dir <- getArg "-d"
+  case (Just $ executePlots) <*> (p <|> Just ['1'..'6']) <*> (dir <|> Just "./") of
+    Just plotter | it > 0 && f >0 -> plotter it f
     _ -> do
       help
       error $ "The given parameters are not valid."

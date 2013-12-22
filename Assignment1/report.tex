@@ -1,0 +1,145 @@
+\documentclass[10pt]{article}
+\usepackage{fullpage}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{alltt}
+\title{Assignment 1: Problem 1}
+\author{Ernesto Rodriguez}
+
+\begin{document}
+
+\Huge{\bf Classification of Human Motion using Echo State Neural Networks\\[1cm]}
+\large{\bf Ernesto Rodriguez\\[0.5cm]}
+\emph{Computer Science \\ Jacobs University Bremen \\ College Ring 7 \\ 28759 \\ Bremen \\ Germany\\[0.5cm]}
+\emph{Type: Guided Research Proposal \\ Date: December 9th, 2012 \\ Supervisor: Prof. Dr. Herbert J\"{a}ger\\}
+\line(1,0){520}\\ \\
+
+\section{Description of the Program}
+
+The program provides a generic way to specify how selection, mutation, corssover and fitness measuring is done so the same routines can be used to evaluate a problem specified as a Genetic programming problem. The algebraic data type \verb+Env+ is used to provide such specification and is defined as follows:
+
+\begin{alltt}
+
+data Env (m :: * -> *) a where
+  Env :: (MonadRandom m, I.MonadRandom m) => \{
+    crossover :: [Vector a] -> m [Vector a],
+    mutate :: Vector a -> m (Vector a),
+    tournament :: forall x . Vector x -> m [Vector x],
+    fitness :: (Vector a) -> Double,
+    selOperation :: m Operation,
+    target :: Vector a                 
+  \} -> Env m a
+
+\end{alltt}
+
+The first component of env is the type parameter \verb+m+ which is simply a monad that allows the generation of pseudo-random values inside it. In most cases the IO Monad is used, but other monads can be considered, especially if the user wishes to run the algorithm inside a pure monad, like the State Monad, so the results are reproducible. 
+
+The second component is a Haskell record denoted by \verb+Env+. This record contains the following fields:
+
+\begin{itemize}
+\item \verb+corssover+: The crossover operator. Given a selection of Vectors from the population, this function is responsible to combine them and produce the children. The function is allowed to use random computatins.
+\item \verb+mutate+: The mutate operator. When provided with a Vector, this operator is responsible to apply a random mutation to this vector. The main difference between the \verb+crossover+ \verb+mutate+ operators is that the \verb+crossover+ operator is allowed to see all the selected members.
+\item \verb+tournament+: This function is responsible to select members from the population that will be mutated or crossovered. The function is a polymorphic function that given a vector of elements, must return several vectors of containing elements of the input parameter. From each of the returned vectors, the strongest member is selected using the fitness function. In other words, every vector in the returned list will be reduced to the single strongest element and after the list is reduced, it will be passed to the \verb+crossover+ or \verb+mutate+ operators.
+\item \verb+fitness+: The Fitness function wich given a vector, calculates a real number that represents the fitness of that vector. This is the function that will be used to swap memebers from the population and select members from a tournament selection.
+\item \verb+selOperation+: This function is responsible for deciding wether the \verb+crossover+ or \verb+mutate+ operator will be used. It is called every time candidates from the population are chosen and is allowed to use random operations to make a desicion.
+\item \verb+target+: The goal of the algorithm. If that element is produced, the algorithm will be stopoed.
+\end{itemize} 
+
+The program also provides some implementations of theese parameters. They are the following:
+
+\subsection{Crossover Implementations} 
+
+\verb+uniformCrossover+: It takes as an argument the probability of choosing one bit from the first parent against choosing the bit from the second parent. It then will return a uniform crossover operator for the given probability.
+\\\\
+\verb+twoPointCrossoverAll+: This crossover operator splits the child verctor into two sections and fills one section with the values from the first parent and the second section with values of the other parent. The sections are selected as follws, first two numbers are produced:
+\[
+x_0 \sim \mathcal{U}(0,l)
+\]
+\[
+x_n' \sim \mathcal{N}(x_0 + l/2,l/s)
+\]
+\[
+x_n = \left\{
+    \begin{array}{l l}
+    x_0 & \quad \text{if $x_n' < x_0$}\\
+    x_0+l-1 & \quad \text{if $x_n' \geq x_0 + l$}\\
+    x_n' & \quad \text{otherwise}
+    \end{array} \right.
+\]
+where,
+\begin{itemize}
+\item $l$ is the the size of the bits vector.
+\item $s$ is the deviation parameter of the function
+\end{itemize}
+
+Then given the parent vectors $v_a$ $v_b$, the ith element of the result vector $v_{res}$ is selected as follows:
+\[ v_{res}[i] = \left\{ 
+  \begin{array}{l l}
+    v_a[i] & \quad \text{if $i \in \{x \mod{l}\ |\ x = x_0 .. x_n \}$}\\
+    -(n+1)/2 & \quad \text{otherwise}
+  \end{array} \right.
+\]
+
+The intuition here is selecting an index ($x_0$) at random and then selecting an offset from the index ($x_n$) which will be on average half the lenght of the vector but distributed normally accross multiple possible lenghts. Then the selected range is assigned values from one parent and the remainder is assigned values from the other parent.
+
+\subsection{Mutate Implementations}
+
+\verb+mutateDefault+: This function flips the value of $n$ random bits in a vector with probability $1/n$.
+
+\subsection{Fitness Implementations}
+
+\verb+trapFunction+: Implementation of the trap fitness function. It takes as arguments a value for $k$ and $s$.
+\\\\
+\verb+ungroupedTrapFunction+: It behaves exactly the same as the trap function, but it takes an additional mapping $m$ as argument, which is a vector where the value of each index indicates the index of that value in the mapped vector. Formally it is:
+\[
+v_m[i]\ =\ v_{in}[m[i]]
+\]
+where,
+\begin{itemize}
+  \item i indicates the ith index
+  \item $v_m$ is the new vector for which the trap function will be applied
+  \item $m$ is the vector with mappings
+  \item $v_{in}$ is the input vector6
+\end{itemize}
+
+\subsection{Tournament Implementations}
+
+\verb+tournamentN+: This function performs tourament selection. The fist argument provided is the number of tournament selections to be done and the second argument indicates the tournament size. Normal values for this function would be 2 for number of selections and 2 for tournament size which will select two elements using tournaments of size 2.
+
+\subsection{Operator Selection}
+\verb+selFun+: This function takes as an argument the probability of selecting the crossover operator encoded as a rational number.
+\\\\
+\verb+defSel+: This function selects the \verb+mutate+ and \verb+croosover+ operators with equal probability.
+
+\subsection{Flow}
+
+There exists several functions responsible for evolving a population under the conditions of a particular environment until a global optimal is found or no improvement happens for a long time. The most important functions outlined below.
+\\\\
+\verb+runExperiment+: I takes an environment and a generation size as a parameter. It then proceedes to evolve the generation with the operators and fitness function provided with the environment. It uses the function \verb+nextGenerations+ to produce the subsequent generations.
+\\\\
+\verb+nextGenerations+: This function produces new generations until the global optimal solution is produced or no improvement happens in 10 times the population size. This function is a wrapper for the \verb+nextGenerationsS+ which does the actual work inside the State Monad to allow a more optimized implementation using tail recursion.
+\\\\
+\verb+performOperation+: Function responsible for producing a new member for the population. It is provided with the environment, an operator and a population. It then proceeds to select members from the population using the tournament function and applies the operator to those elements. It then measures the fitness of the resulting element and adds it to the population if it is fit enough.
+
+\subsection{Generations}
+
+For all bookeeping concerning the administration of generations, the specialized \verb+Generation+ data type is used. This data type contains a vector with all members of the population along with their fitness. This avoids recumputing the fitness whenever members of the population are being compared. Another optimizadion is that the structure keeps track of the strongest and weakest members of the population. This reduces the computational time required to determine wether a solution will be allowed to enter the population. Once a new solution is added to the population, the strongest and weakest members can be found in linear time.
+
+\section{Discussion}
+
+
+
+\subsection{Randomized Deceptive Trap Function}
+
+In the case of the Randomized Deceptive Trap Function, the operator that found the best solutions was simply random mutation. The runs that used the crossover operator usually had difficulties preserving the population diversity.
+
+Observing the evolution of the population in some informal experiments, the case usually was that after reaching certain level of fitness, the entire population started converging to a local optimal value which evenutally became the entire population. It appeared to be the case that no matter what element was produced by crossover, it would only be accepted if it was the alredy found local maximum value.
+
+Several approaches were tried. First, running the experiment with a higher probability of mutation over crossover was performed. The performance was usually better but the dissapointing part was that the best results were still usually when no crossover was used.
+
+A final effort to increase diversity was combining the two-point crossover with mutation. In this case, each of the parents was mutated before applying the two point crossover. As it can be seen in the benchmarks, this method performed better than the other crossover operators and yielded comparable results to random mutation with much less iterations.
+
+It can be hypothesized from the results that by random mutation it is very unlikely that an improvement will happen for this function. Therefore, the corssover operator quickly filled the population with a sub-optimal solution and it was very difficult to keep diversity because the solutions resulting from random mutations were usually weaker. The combination of crossover with mutation in a single operator seemed to allow more diversity to occur. No hard statements can be made about why it is so, but that is the way it happens in nature. Mutation and gene transfer occurs as a single operation.
+
+\end{document}
