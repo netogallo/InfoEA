@@ -4,15 +4,14 @@
 \usepackage{cite}
 \usepackage{hyperref}
 \usepackage{alltt}
+\usepackage{graphicx}
 \title{Assignment 1: Problem 1}
 \author{Ernesto Rodriguez}
 
 \begin{document}
 
-\Huge{\bf Classification of Human Motion using Echo State Neural Networks\\[1cm]}
+\Huge{\bf Genetic Programming - Practical Assignment Part 1\\[1cm]}
 \large{\bf Ernesto Rodriguez\\[0.5cm]}
-\emph{Computer Science \\ Jacobs University Bremen \\ College Ring 7 \\ 28759 \\ Bremen \\ Germany\\[0.5cm]}
-\emph{Type: Guided Research Proposal \\ Date: December 9th, 2012 \\ Supervisor: Prof. Dr. Herbert J\"{a}ger\\}
 \line(1,0){520}\\ \\
 
 \section{Description of the Program}
@@ -82,6 +81,13 @@ Then given the parent vectors $v_a$ $v_b$, the ith element of the result vector 
 \]
 
 The intuition here is selecting an index ($x_0$) at random and then selecting an offset from the index ($x_n$) which will be on average half the lenght of the vector but distributed normally accross multiple possible lenghts. Then the selected range is assigned values from one parent and the remainder is assigned values from the other parent.
+\\\\
+\verb+randomizedTwoPointCrossover+: This operator operates the same way as the \verb+twoPointCrossoverAll+ except that the \verb+mutate+ operator described above is applied to each of the parents before doing the crossover. In fact it is defined as:
+\begin{alltt}
+ randomizedTwoPointCroosver\ =\ twoPointCrossoverAll s . mapM mutateDefault
+\end{alltt}
+
+As it can be observed, it is simply the function composition of mutating all the input parents and then applying the standard two point crossoverr. This operator was introduced with the hope that it would better preserve diversity than using the mutate and crossover operators independently.
 
 \subsection{Mutate Implementations}
 
@@ -126,17 +132,100 @@ There exists several functions responsible for evolving a population under the c
 
 For all bookeeping concerning the administration of generations, the specialized \verb+Generation+ data type is used. This data type contains a vector with all members of the population along with their fitness. This avoids recumputing the fitness whenever members of the population are being compared. Another optimizadion is that the structure keeps track of the strongest and weakest members of the population. This reduces the computational time required to determine wether a solution will be allowed to enter the population. Once a new solution is added to the population, the strongest and weakest members can be found in linear time.
 
-\section{Discussion}
+\section{Description of the Experiment}
+
+The objective of this experiment was to test genetic algorithms on several different functions and study their behavior using different parameters for the algorithms. The functions that were tested are:
+
+\begin{itemize}
+\item Uniformely Scaled Counting Ones Function
+\item Linearly Scaled Counting Ones Function
+\item Non-Deceptive Trap Function ($k=4,\ d=2.5$)
+\item Deceptive Trap Function ($k=4,\ d=1$)
+\item Randomized Deceptive Trap Function
+\end{itemize}
+
+To solve theese functions, three croosver operators and one mutate operators were used. The crossover operators were: \verb+uniformCrossover+, \verb+twoPointCrossover+ and \verb+randomizedTwoPointCrossover+. The mutate operators were: \verb+mutateDefault+. 
+
+Two different methods for sampling the population were used, namely one member tournament and two member tournament. In the first case a single element was chosen at random and in the second case, two elements were chosen at random and the fittest one was chosen as the sample.
+
+Three operator selection criterias were used: Choosing mutate with 100\% probability, choosing mutate and crossover each with 50\% probability and choosing crossover with 100\% probability. 
+
+All combinations of the above parameters were tested with populations of size 30 to 450 in population increments of 30 members. An experiment with a particular selection of parameters and population size was repeated 30 times and the results were averaged.
+\pagebreak
+\section{Results and Discussion}
+
+\subsection{Uniformely Scaled Counting Ones Function}
+
+\begin{figure}[h!]
+  \centering
+    \includegraphics[height=170px]{img/SumFunctionRandomIters.png}
+    \includegraphics[height=170px]{img/SumFunctionRandomGens.png}
+    \includegraphics[height=170px]{img/SumFunctionBothIters.png}
+    \includegraphics[height=170px]{img/SumFunctionBothGens.png}
+    \includegraphics[height=170px]{img/SumFunctionCrossoverIters.png}
+    \includegraphics[height=170px]{img/SumFunctionCrossoverGens.png}
+    \caption{Performance for the Uniformely Scaled Counting Ones Function}
+\end{figure}
+
+The uniformely scaled counting ones function is a very simple function. As expected, all methods were able to find the global maximum with generations of sizes as small as 30. Except for the case of the randomized two point crossover operator, the crossover operator did not provide a significant advantage in number of iterations required to find a solution. For this case, the randomized two point crossover operator was the one that could find solutions with least number of iterations.
+
+\subsection{Linearly Scaled Sum Function}
 
 
 
+\subsection{Trap Function}
+
+\begin{figure}[h!]
+  \centering
+    \includegraphics[height=170px]{img/TrapFunctionRandomIters.png}
+    \includegraphics[height=170px]{img/TrapFunctionRandomGens.png}
+    \includegraphics[height=170px]{img/TrapFunctionBothIters.png}
+    \includegraphics[height=170px]{img/TrapFunctionBothGens.png}
+    \includegraphics[height=170px]{img/TrapFunctionCrossoverIters.png}
+    \includegraphics[height=170px]{img/TrapFunctionCrossoverGens.png}
+    \caption[Performance for the Trap Functions]{Performance for the Trap Functions}
+\end{figure}
+
+For the Trap Function, soely random mutation produced the best performance. With generaton sizes of around 300 members and 50,000 iterations it could find the global optimum for all the runs. For this function, one can expect random mutation to work well with big enough populations since any zero that gets flipped into a one will result in an improvement. Since the stop criteria required no improvement a significant ammount of iterations without improvement (4,000 when generation is 400) it was very likely that an improvement occurred in theese conditions.
+
+The added value for this case for crossover is the faster convergence speed. The randomized two point crossover operator could find global optimums by itself with about 15,000 iterations and generations of 300 members. This is a considerable improvement on use of resources. This function also suggests that combining mutation and crossover in a single operator has an added extra value since the randomized two point crossover operator had better performance than combining mutation and two point crossover each with 1/2 probability. The uniform crossover operator did not perform well at this task. Especially since it required much more runs and produced no improvement over other methods.
+\pagebreak
+\subsection{Deceptive Trap Function}
+
+\begin{figure}[h!]
+  \centering
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionRandomIters.png}
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionRandomFitness.png}
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionBothIters.png}
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionBothFitness.png}
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionCrossoverIters.png}
+    \includegraphics[height=170px]{img/DeceptiveTrapFunctionCrossoverFitness.png}
+    \caption[Performance for the Trap Functions]{Performance for the Trap Functions}
+\end{figure}
+
+For the deceptive trap function, complete randomness also produced solutions with very strong fitness after many iterations. An average 90 for the maximum fitness was obtained with this approach with 200,000 iterations. Nevertheless, this case was favorable for algorithms that used crossover. The results were specially favorable when using tournament 1 selection and 1.0 crossover probability. For these cases, the two point corssover and randomized two point crossover operators managed to find the global optimal very reliably once the generation size was over 300 elements with less than 50,000 iterations showing very superior results to those using only randomness. Another surprising result is that results were better when mutation and corssover were used with equal probability. 
+
+Although mutation is an important element that allows a more widespread exploration of solutions, the two point crossover by itself could produce good solutions in less iterations than the mutate operator. This could stem from the fact that the initial population is generated randomoly, so this still provides the two point crossover with some randomness, especially if the population is big so a lot of diversity is preserved. Nevertheless, random mutation is important and this is made evident by the fact that the two point crossover performed better when mutation probability was 50\% and because the randomized crossover operator always did better. An interesting remark is that the randomized two point crossover operator always did better than the two point crossover operator. This suggests that there might be an added extra value in combining crossover and mutation in a single operator.
+
+\pagebreak
 \subsection{Randomized Deceptive Trap Function}
+
+\begin{figure}[h!]
+  \centering
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionRandomIters.png}
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionRandomGens.png}
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionBothIters.png}
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionBothGens.png}
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionCrossoverIters.png}
+    \includegraphics[height=170px]{img/RandomizedDeceptiveTrapFunctionCrossoverGens.png}
+    \caption[Performance for the Trap Functions]{Performance for the Trap Functions}
+\end{figure}
 
 In the case of the Randomized Deceptive Trap Function, the operator that found the best solutions was simply random mutation. The runs that used the crossover operator usually had difficulties preserving the population diversity.
 
-Observing the evolution of the population in some informal experiments, the case usually was that after reaching certain level of fitness, the entire population started converging to a local optimal value which evenutally became the entire population. It appeared to be the case that no matter what element was produced by crossover, it would only be accepted if it was the alredy found local maximum value.
+Observing the evolution of the population in some informal experiments, the case usually was that after reaching certain fitness value, the entire population began converging to a local optimal value which evenutally became the entire population. It appeared to be the case that no matter what element was produced by crossover, it would only be accepted if it was the alredy found local maximum value.
 
-Several approaches were tried. First, running the experiment with a higher probability of mutation over crossover was performed. The performance was usually better but the dissapointing part was that the best results were still usually when no crossover was used.
+To work around the situation, several approaches were considered. First, running the experiment with a higher probability of mutation over crossover was performed. The performance was usually better but the dissapointing part was that the best results were still occurred when no crossover was used.
 
 A final effort to increase diversity was combining the two-point crossover with mutation. In this case, each of the parents was mutated before applying the two point crossover. As it can be seen in the benchmarks, this method performed better than the other crossover operators and yielded comparable results to random mutation with much less iterations.
 

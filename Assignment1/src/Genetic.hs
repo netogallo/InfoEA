@@ -27,7 +27,7 @@ import System.Environment (getArgs,getProgName)
 import Control.Applicative
 import System.FilePath
 import Control.Concurrent.Async (wait,async)
-import System.Mem
+-- import System.Mem
 
 data Operation = Mutate | Crossover deriving (Enum)
 
@@ -290,7 +290,7 @@ sumEnv = Env{
 
 scaledSumEnv :: (MonadRandom m,I.MonadRandom m) => Env m Int
 scaledSumEnv = sumEnv{
-  fitness = V.ifoldl (\s i x -> fromIntegral (i * x) + s) 0
+  fitness = V.ifoldl (\s i x -> fromIntegral ((1+i) * x) + s) 0
   }
                    
 trapRandomized = Env{
@@ -322,7 +322,7 @@ nextGenerationsS e@Env{..} goal lim = do
   (improved,newGen) <- lift $ nextGeneration e gen
   let
     (c',stop)
-      | goal == (fst $ strongestIx gen) = (0,True)
+      | goal < (fst $ strongestIx gen) + 0.001 = (0,True)
       | not improved && c >= lim = (0,True)
       | improved = (0,False)
       | otherwise = (c+1,False)
@@ -378,7 +378,7 @@ iterate next rep (i:is) = do
     mFt = sFt / repR
     mIters = fromIntegral sIters / repR
   v <- liftM ((i,(mSucc,mFt,mIters)) :) $ iterate next rep is
-  performGC
+  -- performGC
   return v
   where
     cata (succC,sFt,sIters) as = do
