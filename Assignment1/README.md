@@ -1,5 +1,8 @@
 == Genetic ==
 
+Author: Ernesto Rodriguez
+Student Id: 4083369
+
 === Requirements ===
 
 The program requires Haskell to be compiled. Cabal is the recomended

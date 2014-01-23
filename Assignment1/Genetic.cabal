@@ -30,4 +30,6 @@ executable Genetic
                        , gnuplot ==0.5.*
                        , filepath ==1.3.*
                        , async ==2.0.*
+                       , uu-parsinglib
+                       , hashtables
   hs-source-dirs:      src
