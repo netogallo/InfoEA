@@ -16,7 +16,7 @@ cabal-version:       >=1.8
 
 executable Genetic
   main-is: Genetic.hs
-  ghc-options:         -rtsopts -threaded
+  ghc-options:         -rtsopts -threaded -static -O2
   build-depends:       base ==4.6.*
                        , MonadRandom == 0.1.*
                        , random-extras ==0.19.*

@@ -44,6 +44,7 @@ import Control.Parallel.Strategies
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BS
 import System.IO
+import qualified Data.IORef as R
 
 data Result a =
   Result {
@@ -142,7 +143,7 @@ getMembers ht = do
 
 randBS len = V.mapM (const getRandom) $ V.fromList [1 .. len]
 
-initGen ft size len = do
+initGen initM ft size len = do
   ht <- lift $ HT.newSized size
   populate size ht
   (minV,maxV) <- lift $ findMaximals ht
@@ -157,7 +158,7 @@ initGen ft size len = do
     populate size ht
       | size <= 0 = return ht
       | otherwise = do
-        bs <- randBS len
+        bs <- initM
         e <- lift $ HT.lookup ht bs
         case e of
           Just _ -> populate size ht
@@ -186,7 +187,8 @@ data Env m g a where
     fitness :: (Vector a) -> Double,
     selOperation :: RandT g m Operation,
     target :: Double,
-    stopCond :: StopCond (Vector a) -> Bool
+    stopCond :: StopCond (Vector a) -> Bool,
+    initializer :: RandT g m (Vector a)
   } -> Env m g a
 
 
@@ -236,8 +238,9 @@ localSearchIteration f bs = V.ifoldl iLocalSearch (f Nothing bs,bs) bs
       let
         neighborhood = withStrategy (parTraversable rdeepseq) $ validSwaps best (i+1) i
         fittest = V.maximumBy (\a b -> compare (fst a) (fst b)) neighborhood
+        nSize = V.length neighborhood
       in
-       if | V.length neighborhood < 1 -> best
+       if | nSize < 1 -> best
           | (fst fittest) > fst best -> fittest
           | otherwise -> best
 
@@ -267,10 +270,16 @@ balancedOnePointMutation v = do
 
 multiBalancedOnePointMutation c v = foldM (\v' _ -> balancedOnePointMutation v') v [1 .. c]
 
+balancedBsInitializer :: (Functor m, Monad m, RandomGen g) => Int -> RandT g m (Vector Bool)
+balancedBsInitializer n =
+  foldM (\s _ -> balancedOnePointMutation s) v [1 .. n]
+  where
+    v = V.fromList [i `mod` 2 == 0 | i <- [1 .. n]]
+
 balancedUniformCrossoverAll (va:vb:vs) = do
   vx <- balancedUniformCrossover va vb
   liftM (vx :) $ balancedUniformCrossoverAll vs
-balancedUniformCrossoverAll x = trace (show x) $ return []
+balancedUniformCrossoverAll x = return []
 
 balancedUniformCrossover va vb
   | la > lb = balancedUniformCrossover vb va
@@ -487,6 +496,7 @@ twoPointCrossover sigFact v1 v2'
 performOperation Env{..} op gen = do
   members <- lift $ getMembers $ genMembers gen
   elems <- liftM (map maxGen) $ tournament $ members
+  es <- operate elems
   newGen <- liftM (maximumBy cmpGen) $
             operate elems >>= mapM ls
   lift $ genInsertStrong gen newGen
@@ -568,7 +578,7 @@ nextGenerationsS e@Env{..} goal lim = do
 -- and selecting the best members of each generation to find
 -- the best solution
 runExperimentM env@Env{..} size bsSize = do
-  init <- initGen fitness size bsSize
+  init <- initGen initializer fitness size bsSize
   gs' <- nextGenerations 0 env init
   let
     (gs,iters :: Int) = gs'
@@ -583,7 +593,7 @@ runExperimentM env@Env{..} size bsSize = do
     runTime = 0
     }
 
-runExperiment :: (Eq a, Hashable a, RandomGen t,Random a) =>
+runExperiment :: (Show a, Eq a, Hashable a, RandomGen t,Random a) =>
                  Int -> Int -> (forall s . Env (ST s) t a)
                  -> t -> Result (Vector a)
 runExperiment size bsSize env g  =
@@ -600,7 +610,7 @@ benchmarkExperiment exp = do
                           (toRational $ diffUTCTime tn t0)
               }
 
-mslsEnv :: Monad m => Vector (Vector Int) -> Env m g Bool
+mslsEnv :: (RandomGen g, Monad m, Functor m) => Vector (Vector Int) -> Env m g Bool
 mslsEnv g = Env {
   crossover = undefined,
   mutate = return,
@@ -609,7 +619,9 @@ mslsEnv g = Env {
   fitness = ft,
   selOperation = return Mutate,
   target = 0,
-  stopCond = \_ -> True
+  stopCond = \_ -> True,
+  initializer = balancedBsInitializer (V.length g)
+                   
   }
   where
     ft = graphFitness g Nothing
@@ -653,36 +665,34 @@ geneticLocalSearch size num gr gen =
   runExperiment size (V.length gr) (genLSEnv num gr) gen
 
 collectExperiments num name expr =
-  Results{experimentName=name,results=map (const expr) [1..num]}
+  liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
 
-numRuns = 1
-genSize = 2
+numRuns = 30
+genSize = 1000
 
-experiments :: RandomGen g => Vector (Vector Int) -> g -> [Results (Vector Bool)]
-experiments gr gen = [
---  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr gen,
---  mutateLS 2,
---  mutateLS 3,
---  mutateLS 4,
-  genLS 5
-  -- genLS 50,
-  -- genLS 100
+experiments :: Vector (Vector Int) -> IO [Results (Vector Bool)]
+experiments gr = sequence [
+  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr,
+  mutateLS 2,
+  mutateLS 3,
+  mutateLS 4,
+  genLS 50,
+  genLS 100
   ]
 
 
   where
     mutateLS mSize =
-      collectExperiments numRuns ("Mutate LS " ++ (show mSize) ++ "pts") $ mutateLocalSearch genSize mSize gr gen
+      collectExperiments numRuns ("Mutate LS " ++ (show mSize) ++ "pts") $ mutateLocalSearch genSize mSize gr
     genLS genSize = collectExperiments numRuns
-                    ("Genetic LS (" ++ (show genSize) ++ ")") $
-                    geneticLocalSearch 50 1 gr gen
+                    ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")") $
+                    geneticLocalSearch genSize 5 gr
 
 mainRunner graph out = do
   
   gen <- getStdGen
   gr <- loadGraph graph 
-  let
-    res = experiments gr gen
+  res <- experiments gr
   withFile out WriteMode $ \h -> BS.hPutStr h (A.encode res)
 
 
