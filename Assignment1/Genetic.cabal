@@ -32,4 +32,11 @@ executable Genetic
                        , async ==2.0.*
                        , uu-parsinglib
                        , hashtables
+                       , criterion
+                       , hashable
+                       , deepseq
+                       , time
+                       , parallel
+                       , bytestring
+                       , aeson
   hs-source-dirs:      src

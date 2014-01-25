@@ -3,6 +3,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Data.List (maximumBy,findIndex)
@@ -36,14 +38,55 @@ import qualified Data.HashTable.ST.Basic as HT
 -- import Data.Hashable
 import Data.Hashable
 import Control.Monad.ST
--- import System.Mem
+import Data.Time.Clock
+import Control.DeepSeq
+import Control.Parallel.Strategies
+import qualified Data.Aeson as A
+import qualified Data.ByteString.Lazy as BS
+import System.IO
+
+data Result a =
+  Result {
+  iterations :: Int,
+  maxFitness :: Double,
+  maxValue :: a,
+  lastGeneration :: Vector (Double, a),
+  runTime :: Double
+  } deriving (Show, Read)
+
+data Results a =
+  Results {
+    experimentName :: String,
+    results :: [Result a]
+    } deriving (Show, Read)
+
+instance (A.ToJSON a) => A.ToJSON (Results a) where
+  toJSON Results{..} = A.object [
+    "experimentName" A..= experimentName,
+    "results" A..= results
+    ]
+
+instance (A.ToJSON a) => A.ToJSON (Result a) where
+  toJSON Result{..} = A.object [
+    "iterations" A..= iterations,
+    "maxFitness" A..= maxFitness,
+    "maxValue" A..= maxValue,
+    "lastGeneration" A..= lastGeneration,
+    "runTime" A..= runTime
+    ]
+
+instance NFData a => NFData (Result a) where
+  rnf Result{..} = iterations `deepseq`
+                   maxFitness `deepseq`
+                   maxValue `deepseq`
+                   lastGeneration `deepseq`
+                   runTime `deepseq` ()
 
 instance (Hashable a) => Hashable (Vector a) where
   hash v 
     | V.length v > 0 = V.foldl (\a b -> hashWithSalt a b) 0 v
     | otherwise = 0 
-  hashWithSalt x v = hashWithSalt x (hash v) 
-
+  hashWithSalt x v = hashWithSalt x (hash v)
 
 data Operation = Mutate | Crossover deriving (Enum)
 
@@ -126,15 +169,24 @@ initGen ft size len = do
 compareGen :: Ord a => (a, Vector b) -> (a, Vector b) -> Ordering
 compareGen a b = compare (fst a) (fst b)
 
+data StopCond a = StopCond{
+  currentFittest :: a,
+  currentFittness :: Double,
+  currentGeneration :: Vector (Double, a),
+  numIterations :: Int,
+  itersNoImprovement :: Int
+  }
+
 data Env m g a where
-  Env :: {
+  Env :: NFData a => {
     crossover :: [Vector a] -> RandT g m [Vector a],
     mutate :: Vector a -> RandT g m (Vector a),
     ls :: Vector a -> RandT g m (Vector a),
     tournament :: forall x . Vector x -> RandT g m [Vector x],
     fitness :: (Vector a) -> Double,
     selOperation :: RandT g m Operation,
-    target :: Double
+    target :: Double,
+    stopCond :: StopCond (Vector a) -> Bool
   } -> Env m g a
 
 
@@ -148,9 +200,7 @@ graphFitness vx prev bs = V.foldl countAdj (initScore) is
         vs = (vx V.! i)
         scoreF bs' i' = V.foldl (sumAdj bs' i') 0 $ vx V.! i'
         oldScore = scoreF prevBs i * 2
-        -- oldScoreDep = V.foldl (\s i' -> scoreF prevBs i' + s) 0 vs 
         newScore = scoreF bs i * 2
-        -- newScoreDep = V.foldl (\s i' -> scoreF bs i' + s) 0 vs
         
       in (score - oldScore + newScore)
 
@@ -163,24 +213,33 @@ graphFitness vx prev bs = V.foldl countAdj (initScore) is
          (ftPrevBs, countAdjDual prevBs,reComp)
       Nothing -> (0, countAdjSingle, V.fromList [0..(V.length vx - 1)])
 
+localSearchIteration ::
+  (NFData b, Eq b) =>
+  (Maybe (Double,Vector b) -> Vector b -> Double) ->
+  Vector b ->
+  (Double, Vector b)
 localSearchIteration f bs = V.ifoldl iLocalSearch (f Nothing bs,bs) bs
   where
     lim = V.length bs - 1
     allIx = V.fromList [0 .. lim]
-    swapBits sol@(bestFt,best) i = do
-      j <- get
-      put (j+1)
+    validSwaps sol@(bestFt,_) j i =
       let
-        bs' = V.modify (\v -> MV.swap v i j) bs
-        ft' 
-          | f (Just sol) bs' == (f Nothing bs') = f (Just sol) bs'
-          | otherwise = trace (show (f (Just sol) bs',f Nothing bs')) $ f (Just sol) bs'
-      case j of
-        _ | j > lim -> return (bestFt,best)
-        _ | bs V.! j /= bs V.! i && ft' > bestFt -> swapBits (trace (show ft') ft',bs') i
-        _ -> swapBits (bestFt,best) i
-          
-    iLocalSearch best i _ = fst $ runState (swapBits best i) (i+1)
+        calcFt x = (f (Just sol) x,x)
+      in 
+       V.fromList [
+         calcFt $ V.update bs (V.fromList [(j', bs V.! i), (i, bs V.! j')])
+         | j' <- [j  .. lim]
+         , bs V.! j' /= bs V.! i
+         ]
+
+    iLocalSearch best i _ =
+      let
+        neighborhood = withStrategy (parTraversable rdeepseq) $ validSwaps best (i+1) i
+        fittest = V.maximumBy (\a b -> compare (fst a) (fst b)) neighborhood
+      in
+       if | V.length neighborhood < 1 -> best
+          | (fst fittest) > fst best -> fittest
+          | otherwise -> best
 
 localSearch f stop bs = fst $ runState (go bs) 1
   where
@@ -206,14 +265,18 @@ balancedOnePointMutation v = do
       | v V.! r1 == v V.! r2 = swapped r1 ((r2 + 1) `mod` (l + 1))
       | otherwise = V.update v $ V.fromList [(r1,v V.! r2),(r2, v V.! r1)]
 
+multiBalancedOnePointMutation c v = foldM (\v' _ -> balancedOnePointMutation v') v [1 .. c]
+
 balancedUniformCrossoverAll (va:vb:vs) = do
   vx <- balancedUniformCrossover va vb
   liftM (vx :) $ balancedUniformCrossoverAll vs
+balancedUniformCrossoverAll x = trace (show x) $ return []
 
 balancedUniformCrossover va vb
   | la > lb = balancedUniformCrossover vb va
   | otherwise = do
-    gen <- getStdGen
+    seed <- getRandom 
+    let gen = mkStdGen seed
     mBalanced gen va vb
   where
     la = V.length va
@@ -464,68 +527,46 @@ minimumByWithIx cmp v =
       | cmp x x' == GT = (ix',x')
       | otherwise = (ix,x)
 
--- sumEnv :: Env Int
--- sumEnv = Env{
---   crossover = twoPointCrossoverAll 2.0,
---   tournament = tournamentN 2 2,
---   mutate = mutateDefault,
---   fitness = fromIntegral . V.sum,
---   selOperation = defSel,
---   target = V.replicate 100 1
---   }
-
--- scaledSumEnv :: Env Int
--- scaledSumEnv = sumEnv{
---   fitness = V.ifoldl (\s i x -> fromIntegral ((1+i) * x) + s) 0
---   }
-                   
--- trapRandomized = Env{
---   mutate = mutateDefault,
---   crossover = twoPointCrossoverAll 2.0,
---   tournament = tournamentN 2 2,
---   fitness = (ungroupedTrapFunction trapMapping 4 1),
---   selOperation = defSel,
---   target = V.replicate 100 1
--- }
-
--- trapRandomizedMutateBiased = 
---   trapRandomized{
---     selOperation = selFun (1/3)
---     }
                      
 nextGeneration env gen = do
   op <- selOperation env
   performOperation env op gen
 
--- -- | Function that evolves the generations and counts the number
--- -- of generations that have evolved until 
--- -- a solution is found or the stop criteria is met 
+-- | Function that evolves the generations and counts the number
+-- of generations that have evolved until 
+-- a solution is found or the stop criteria is met 
 nextGenerations count env gen = do
   len <- liftM (V.length) $ lift $ getMembers $ genMembers gen
   (final,total,_) <- liftM snd $ flip runStateT (gen,0,0) $ nextGenerationsS env (target env) len
   return (final,total)
 
--- -- | Helper function that keeps the count and current generation in memory used
--- -- by the nextGenerations function. This function is implemented to use
--- -- tail recursion and the state monad for efficiency
+-- | Helper function that keeps the count and current generation
+-- in memory used by the nextGenerations
+-- function. This function is implemented to use
+-- tail recursion and the state monad for efficiency
 nextGenerationsS e@Env{..} goal lim = do
   (gen,total,c) <- get
   (improved,newGen) <- lift $ nextGeneration e gen
+  members <- lift $ lift $ getMembers $ genMembers newGen
   let
-    (c',stop)
-      | goal < (snd $ strongest newGen) + 0.001 = (0,True)
-      | not improved && c >= lim = (0,True)
-      | improved = (0,False)
-      | otherwise = (c+1,False)
+    c'| improved = 0
+      | otherwise = c+1
+    stop = stopCond $ StopCond{
+      currentFittest = fst $ strongest newGen ,
+      currentFittness = snd $ strongest newGen,
+      currentGeneration = members,
+      numIterations = total,
+      itersNoImprovement = c'
+      }                    
   put (newGen,total+1,c')
   unless stop $ nextGenerationsS e goal lim 
         
 -- cmpFitness env a b = compare (fitness env a) (fitness env b)
 
--- -- | Run an experiment that uses an Evolutionary algorithm to
--- -- optimize a function by creating multiple generations and
--- -- and selecting the best members of each generation to find
--- -- the best solution
+-- | Run an experiment that uses an Evolutionary algorithm to
+-- optimize a function by creating multiple generations and
+-- and selecting the best members of each generation to find
+-- the best solution
 runExperimentM env@Env{..} size bsSize = do
   init <- initGen fitness size bsSize
   gs' <- nextGenerations 0 env init
@@ -534,13 +575,123 @@ runExperimentM env@Env{..} size bsSize = do
     fittest =  fst $ strongest gs
 
   members <- lift $ getMembers $ genMembers gs
-  return (iters,fitness fittest,fittest,members)
+  return $ Result{
+    iterations = iters,
+    maxFitness = fitness fittest,
+    maxValue = fittest,
+    lastGeneration = members,
+    runTime = 0
+    }
 
 runExperiment :: (Eq a, Hashable a, RandomGen t,Random a) =>
-                  t -> (forall s . Env (ST s) t a) -> Int -> Int -> (Int, Double, Vector a, Vector (Double,Vector a))
-runExperiment g env size bsSize =
+                 Int -> Int -> (forall s . Env (ST s) t a)
+                 -> t -> Result (Vector a)
+runExperiment size bsSize env g  =
   runST $ liftM fst $ (runRandT (runExperimentM env size bsSize) g) 
-    
+
+benchmarkExperiment exp = do
+  gen <- getStdGen
+  t0 <- getCurrentTime
+  let
+    res = exp gen
+  res `deepseq` (return ())
+  tn <- getCurrentTime
+  return $ res{runTime = fromRational
+                          (toRational $ diffUTCTime tn t0)
+              }
+
+mslsEnv :: Monad m => Vector (Vector Int) -> Env m g Bool
+mslsEnv g = Env {
+  crossover = undefined,
+  mutate = return,
+  ls = return . ls,
+  tournament = return . (:[]),
+  fitness = ft,
+  selOperation = return Mutate,
+  target = 0,
+  stopCond = \_ -> True
+  }
+  where
+    ft = graphFitness g Nothing
+    ls :: Vector Bool -> Vector Bool
+    ls = localSearch (graphFitness g) (const False)
+
+mutateLSEnv num c g = (mslsEnv g){
+
+  mutate = multiBalancedOnePointMutation c,
+  -- Stop once there is no LS improvement
+  stopCond = \st -> numIterations st > num
+  }
+
+genLSEnv num g = (mslsEnv g){
+  crossover = balancedUniformCrossoverAll,
+  selOperation = return Crossover,
+  tournament = tournamentN 2 1,
+  stopCond = \st -> itersNoImprovement st > num
+  }
+
+-- | Wrapper for the multi-start local search
+msls :: RandomGen g =>
+  Int -- | Number of starting points
+  -> Vector (Vector Int) -- | Graph as Adjacency list
+  -> g -- | Random number generator
+  -> Result (Vector Bool) -- | The result of the search 
+msls sp gr gen = runExperiment sp (V.length gr) (mslsEnv gr) gen 
+
+mutateLocalSearch ::
+  RandomGen g =>
+  Int -- | Number of local search/mutations performed
+  -> Int -- | Number of vertexes to be mutated
+  -> Vector (Vector Int) -- | Graph
+  -> g -- | Random number generator
+  -> Result (Vector Bool)
+mutateLocalSearch num dist gr gen =
+  runExperiment 1 (V.length gr) (mutateLSEnv num dist gr) gen
+
+
+geneticLocalSearch size num gr gen =
+  runExperiment size (V.length gr) (genLSEnv num gr) gen
+
+collectExperiments num name expr =
+  Results{experimentName=name,results=map (const expr) [1..num]}
+
+numRuns = 1
+genSize = 2
+
+experiments :: RandomGen g => Vector (Vector Int) -> g -> [Results (Vector Bool)]
+experiments gr gen = [
+--  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr gen,
+--  mutateLS 2,
+--  mutateLS 3,
+--  mutateLS 4,
+  genLS 5
+  -- genLS 50,
+  -- genLS 100
+  ]
+
+
+  where
+    mutateLS mSize =
+      collectExperiments numRuns ("Mutate LS " ++ (show mSize) ++ "pts") $ mutateLocalSearch genSize mSize gr gen
+    genLS genSize = collectExperiments numRuns
+                    ("Genetic LS (" ++ (show genSize) ++ ")") $
+                    geneticLocalSearch 50 1 gr gen
+
+mainRunner graph out = do
+  
+  gen <- getStdGen
+  gr <- loadGraph graph 
+  let
+    res = experiments gr gen
+  withFile out WriteMode $ \h -> BS.hPutStr h (A.encode res)
+
+
+main = do
+  args <- getArgs
+  name <- getProgName
+  case args of
+    [graph,out] -> mainRunner graph out
+    _ -> print $ "Usage: " ++ name ++ " {Graph File} {Out File}"
 
 -- -- | Run an iteration of an experiment and collect the results
 -- iteration env@Env{..} size = do
@@ -761,5 +912,3 @@ runExperiment g env size bsSize =
 --   case h of
 --     Nothing -> operation
 --     Just _ -> help
-
-main = return ()
