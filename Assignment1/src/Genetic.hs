@@ -22,7 +22,11 @@ import Data.Random.Distribution (rvar)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Ratio
 import GHC.Real (Ratio(..))
+import Data.STRef
 import qualified Data.Sequence as S
+import qualified Data.Traversable as T
+import qualified Data.Foldable as F
+import Data.Functor
 import qualified Data.Vector.Mutable as MV
 import Debug.Trace
 import Control.Monad.Trans.State
@@ -182,7 +186,7 @@ data Env m g a where
   Env :: NFData a => {
     crossover :: [Vector a] -> RandT g m [Vector a],
     mutate :: Vector a -> RandT g m (Vector a),
-    ls :: Vector a -> RandT g m (Vector a),
+    ls :: Vector a -> Rand StdGen (Vector a),
     tournament :: forall x . Vector x -> RandT g m [Vector x],
     fitness :: (Vector a) -> Double,
     selOperation :: RandT g m Operation,
@@ -191,6 +195,69 @@ data Env m g a where
     initializer :: RandT g m (Vector a)
   } -> Env m g a
 
+-- | The `power crossover` 
+pCX g va vb = runST $ powerCrossover g va vb
+
+pCXAll g (va:vb:vs) = pCX g va vb : pCXAll g vs
+pCXAll _ _ = []
+
+-- | Crossover operator that chooses the fittest combinations
+-- from both parents to inherit to the children
+powerCrossover gr va vb = do
+  cache <- MV.replicate gSize True
+  result <- MV.replicate gSize False
+  powerCrossoverImp cache result
+
+  where
+    gSize = V.length gr
+    adjecency i bs =
+      V.foldl (\c j -> case j of
+                _ | bs V.! j == bs V.! i -> c
+                _ -> c - 1) (0 :: Int) $ gr V.! i
+                     
+    sortedPower = withStrategy (parTraversable rdeepseq) $
+      S.sortBy (\a b -> compare (fst a) (fst b)) $
+      S.mapWithIndex
+      (\i _ -> case i of
+          _ | adjecency i va > adjecency i vb ->
+            (adjecency i va,(i,va))
+          _ -> (adjecency i vb, (i,vb))) $ S.replicate gSize 0
+
+    vReplace balance cache result i' bs = do
+      reps <- V.filterM (\i -> MV.read cache i) $ V.cons i' (gr V.! i')
+      let
+        mapFun i = do 
+          MV.write result i (bs V.! i)
+          MV.write cache i False
+          modifySTRef balance (\v -> if bs V.! i then v+1 else v-1) 
+          
+      V.mapM mapFun reps
+      return ()
+
+    fixBalance balance result = do
+      b <- readSTRef balance
+      let
+        bFilter
+          | b > 0 = \i -> MV.read result i
+          | otherwise = \i -> liftM not $ MV.read result i
+        bWriter
+          | b > 0 = \i -> MV.write result i False
+          | otherwise = \i -> MV.write result i True
+      
+      adj <- filterM bFilter
+             $ F.toList 
+             $ (\(_,(i,_)) -> i) <$> (S.reverse sortedPower)
+      mapM bWriter $ take (abs b `div` 2) adj
+    
+    powerCrossoverImp cache result = do
+      balance <- newSTRef (0 :: Int)
+      T.mapM (\(_,(i,bs)) -> vReplace balance cache result i bs) sortedPower
+      fixBalance balance result
+      r <- V.generateM gSize (\i -> MV.read result i)
+      
+      return r
+        
+  
 
 graphFitness vx prev bs = V.foldl countAdj (initScore) is
   where
@@ -215,16 +282,22 @@ graphFitness vx prev bs = V.foldl countAdj (initScore) is
          (ftPrevBs, countAdjDual prevBs,reComp)
       Nothing -> (0, countAdjSingle, V.fromList [0..(V.length vx - 1)])
 
+data LSType = Greedy | Full
+
 localSearchIteration ::
   (NFData b, Eq b) =>
+  LSType ->
   (Maybe (Double,Vector b) -> Vector b -> Double) ->
   Vector b ->
   (Double, Vector b)
-localSearchIteration f bs = V.ifoldl iLocalSearch (f Nothing bs,bs) bs
+localSearchIteration t f bs =
+  case t of
+    Full -> V.ifoldl iLocalSearch (f Nothing bs,bs) bs
+    Greedy -> greedyLS (f Nothing bs, bs) 0
   where
     lim = V.length bs - 1
     allIx = V.fromList [0 .. lim]
-    validSwaps sol@(bestFt,_) j i =
+    validSwaps sol j i =
       let
         calcFt x = (f (Just sol) x,x)
       in 
@@ -234,23 +307,63 @@ localSearchIteration f bs = V.ifoldl iLocalSearch (f Nothing bs,bs) bs
          , bs V.! j' /= bs V.! i
          ]
 
+    getNeighborhood best i =
+      withStrategy (parTraversable rdeepseq) $
+      validSwaps best (i+1) i
+
+    getStrongestNeighbor nh =
+      V.maximumBy (\a b -> compare (fst a) (fst b)) nh
+
+    greedyLS best i =
+      let
+        nh = getNeighborhood best i
+        fittest = getStrongestNeighbor nh
+      in
+       if | i > lim -> best
+          | V.length nh < 1 -> best
+          | fst fittest > fst best -> fittest
+          | otherwise -> greedyLS best (i+1)
+        
     iLocalSearch best i _ =
       let
-        neighborhood = withStrategy (parTraversable rdeepseq) $ validSwaps best (i+1) i
-        fittest = V.maximumBy (\a b -> compare (fst a) (fst b)) neighborhood
+        neighborhood = getNeighborhood best i
+        fittest = getStrongestNeighbor neighborhood
         nSize = V.length neighborhood
       in
        if | nSize < 1 -> best
           | (fst fittest) > fst best -> fittest
           | otherwise -> best
 
-localSearch f stop bs = fst $ runState (go bs) 1
+fullGreedyLSI f bs = fullGreedyLSILoop (localSearchIteration Greedy f bs)
   where
+    fullGreedyLSILoop prev@(prevFt,prevBs) =
+      let
+        sol@(ft,_) = localSearchIteration Greedy f prevBs
+      in
+       if | ft > prevFt -> fullGreedyLSILoop sol
+          | otherwise -> prev 
+
+localSearch = genLocalSearch [
+  -- localSearchIteration Greedy
+  -- ,localSearchIteration Greedy
+  fullGreedyLSI
+  -- ,localSearchIteration Full
+  ]
+
+-- fullLocalSearch = genLocalSearch [
+--    localSearchIteration Full
+--    ]
+
+genLocalSearch (l:ls) f stop bs = fst $ runState (go bs) 1
+  where
+    searchFold sol@(_,bs) lso = lso f bs
     go bs = do
       i <- get
       put (i+1)
       let
-        sol@(bsFt,bs') = localSearchIteration f bs
+        sol@(bsFt,bs') = foldl searchFold (l f bs) ls 
+        -- sol'@(_,bs') = 
+        -- sol@(bsFt,bs'') = 
       case stop i of
         False | bsFt > f (Just sol) bs -> go bs'
         _ -> return bs
@@ -291,13 +404,13 @@ balancedUniformCrossover va vb
     la = V.length va
     lb = V.length vb
 
-test = do
-  let ls = (replicate 10 True) ++ (replicate 10 False)
+test cx = do
+  let ls = (replicate 250 True) ++ (replicate 250 False)
   va <- sampleRVar $ liftM V.fromList $ shuffle ls
   vb <- sampleRVar $ liftM V.fromList $ shuffle ls
-  g <- trace "-------" getStdGen
-  vx <- mBalanced g (trace (show va) va) (trace (show vb) vb)
-  if V.length (V.filter id (trace (show vx) vx)) /= 10 then error ("Bad: " ++ (show va) ++ (show vb)) else return ()
+  g <- getStdGen
+  vx <- cx g va vb -- (trace (show va) va) (trace (show vb) vb)
+  if V.length (V.filter id vx) /= 250 then error ("Bad: " ++ (show va) ++ (show vb)) else return ()
 
 data SelState = AnyBit | TrueBit | FalseBit deriving (Eq,Enum)
 
@@ -496,9 +609,14 @@ twoPointCrossover sigFact v1 v2'
 performOperation Env{..} op gen = do
   members <- lift $ getMembers $ genMembers gen
   elems <- liftM (map maxGen) $ tournament $ members
-  es <- operate elems
-  newGen <- liftM (maximumBy cmpGen) $
-            operate elems >>= mapM ls
+  searchSpace <- operate elems
+  rands <- replicateM (length searchSpace) getRandom
+  rands `deepseq` (return ()) -- Force evaluation
+  let
+    newGen = maximumBy cmpGen
+             $ withStrategy (parList rdeepseq)
+             $ map (\(v,i) -> fst $ runRand (ls v) (mkStdGen i))
+             $ zip searchSpace (rands :: [Int])
   lift $ genInsertStrong gen newGen
     
   where
@@ -628,6 +746,10 @@ mslsEnv g = Env {
     ls :: Vector Bool -> Vector Bool
     ls = localSearch (graphFitness g) (const False)
 
+-- mslsFullEnv g = (mslsEnv g){ls = return . ls}
+--   where
+--     ls = fullLocalSearch (graphFitness g) (const False)
+
 mutateLSEnv num c g = (mslsEnv g){
 
   mutate = multiBalancedOnePointMutation c,
@@ -639,7 +761,11 @@ genLSEnv num g = (mslsEnv g){
   crossover = balancedUniformCrossoverAll,
   selOperation = return Crossover,
   tournament = tournamentN 2 1,
-  stopCond = \st -> itersNoImprovement st > num
+  stopCond = \st -> False -- itersNoImprovement st > num
+  }
+
+powerCXenv num g = (genLSEnv num g){
+  crossover = return . (pCXAll g)
   }
 
 -- | Wrapper for the multi-start local search
@@ -664,20 +790,25 @@ mutateLocalSearch num dist gr gen =
 geneticLocalSearch size num gr gen =
   runExperiment size (V.length gr) (genLSEnv num gr) gen
 
+pCXSearch size num gr gen =
+  runExperiment size (V.length gr) (genLSEnv num gr) gen
+
 collectExperiments num name expr =
   liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
 
-numRuns = 30
-genSize = 1000
+numRuns = 5
+genSize = 500
 
 experiments :: Vector (Vector Int) -> IO [Results (Vector Bool)]
 experiments gr = sequence [
-  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr,
-  mutateLS 2,
-  mutateLS 3,
-  mutateLS 4,
-  genLS 50,
-  genLS 100
+  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr
+  ,mutateLS 2
+  ,mutateLS 3
+  ,mutateLS 4
+  ,genLS 50
+  ,genLS 100
+  ,pCXLS 50
+  ,pCXLS 100
   ]
 
 
@@ -685,8 +816,12 @@ experiments gr = sequence [
     mutateLS mSize =
       collectExperiments numRuns ("Mutate LS " ++ (show mSize) ++ "pts") $ mutateLocalSearch genSize mSize gr
     genLS genSize = collectExperiments numRuns
-                    ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")") $
-                    geneticLocalSearch genSize 5 gr
+                    ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")")
+                    $ geneticLocalSearch genSize 5 gr
+    pCXLS genSize = collectExperiments numRuns
+                    ("Power Crossover LS ("
+                     ++ (show (genSize :: Int)) ++ ")")
+                    $ pCXSearch genSize 5 gr
 
 mainRunner graph out = do
   
