@@ -737,7 +737,7 @@ mslsEnv g = Env {
   fitness = ft,
   selOperation = return Mutate,
   target = 0,
-  stopCond = \_ -> True,
+  stopCond = const True,
   initializer = balancedBsInitializer (V.length g)
                    
   }
@@ -754,14 +754,14 @@ mutateLSEnv num c g = (mslsEnv g){
 
   mutate = multiBalancedOnePointMutation c,
   -- Stop once there is no LS improvement
-  stopCond = \st -> numIterations st > num
+  stopCond = \st -> itersNoImprovement st > num
   }
 
 genLSEnv num g = (mslsEnv g){
   crossover = balancedUniformCrossoverAll,
   selOperation = return Crossover,
   tournament = tournamentN 2 1,
-  stopCond = \st -> False -- itersNoImprovement st > num
+  stopCond = \st -> itersNoImprovement st > num
   }
 
 powerCXenv num g = (genLSEnv num g){
@@ -793,8 +793,11 @@ geneticLocalSearch size num gr gen =
 pCXSearch size num gr gen =
   runExperiment size (V.length gr) (genLSEnv num gr) gen
 
-collectExperiments num name expr =
-  liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
+collectExperiments num name expr = do
+  res <- liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
+  BS.hPutStr stdout (A.encode res)
+  return res
+         
 
 numRuns = 5
 genSize = 500
@@ -814,14 +817,20 @@ experiments gr = sequence [
 
   where
     mutateLS mSize =
-      collectExperiments numRuns ("Mutate LS " ++ (show mSize) ++ "pts") $ mutateLocalSearch genSize mSize gr
-    genLS genSize = collectExperiments numRuns
-                    ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")")
-                    $ geneticLocalSearch genSize 5 gr
-    pCXLS genSize = collectExperiments numRuns
-                    ("Power Crossover LS ("
-                     ++ (show (genSize :: Int)) ++ ")")
-                    $ pCXSearch genSize 5 gr
+      collectExperiments numRuns
+      ("Mutate LS " ++ (show mSize) ++ "pts")
+      $ mutateLocalSearch 5 mSize gr
+      
+    genLS genSize =
+      collectExperiments numRuns
+      ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")")
+      $ geneticLocalSearch genSize 5 gr
+      
+    pCXLS genSize =
+      collectExperiments numRuns
+      ("Power Crossover LS ("
+       ++ (show (genSize :: Int)) ++ ")")
+      $ pCXSearch genSize 5 gr
 
 mainRunner graph out = do
   
