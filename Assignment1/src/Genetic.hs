@@ -75,8 +75,8 @@ instance (A.ToJSON a) => A.ToJSON (Result a) where
   toJSON Result{..} = A.object [
     "iterations" A..= iterations,
     "maxFitness" A..= maxFitness,
-    "maxValue" A..= maxValue,
-    "lastGeneration" A..= lastGeneration,
+--    "maxValue" A..= maxValue,
+--    "lastGeneration" A..= lastGeneration,
     "runTime" A..= runTime
     ]
 
@@ -795,7 +795,7 @@ pCXSearch size num gr gen =
 
 collectExperiments num name expr = do
   res <- liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
-  BS.hPutStr stdout (A.encode res)
+  BS.hPutStr stdout (A.encode res) >> BS.hPutStr stdout "\n"
   return res
          
 
