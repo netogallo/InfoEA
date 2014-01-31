@@ -733,7 +733,7 @@ mslsEnv g = Env {
   crossover = undefined,
   mutate = return,
   ls = return . ls,
-  tournament = return . (:[]),
+  tournament = \v -> return $ replicate (V.length v) v,
   fitness = ft,
   selOperation = return Mutate,
   target = 0,
@@ -754,14 +754,14 @@ mutateLSEnv num c g = (mslsEnv g){
 
   mutate = multiBalancedOnePointMutation c,
   -- Stop once there is no LS improvement
-  stopCond = \st -> itersNoImprovement st > num
+  stopCond = \st -> numIterations st >= num
   }
 
 genLSEnv num g = (mslsEnv g){
   crossover = balancedUniformCrossoverAll,
   selOperation = return Crossover,
   tournament = tournamentN 2 1,
-  stopCond = \st -> itersNoImprovement st > num
+  stopCond = \st -> numIterations st >= num
   }
 
 powerCXenv num g = (genLSEnv num g){
@@ -795,16 +795,16 @@ pCXSearch size num gr gen =
 
 collectExperiments num name expr = do
   res <- liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
-  BS.hPutStr stdout (A.encode res) >> BS.hPutStr stdout "\n"
+  BS.hPutStr stdout (A.encode res) >> BS.hPutStr stdout "\n" >> hFlush stdout
   return res
          
 
-numRuns = 5
-genSize = 500
+numRuns = 1
+iters = 250
 
 experiments :: Vector (Vector Int) -> IO [Results (Vector Bool)]
 experiments gr = sequence [
-  collectExperiments numRuns "Mulit Start LS" $ msls genSize gr
+  collectExperiments numRuns "Mulit Start LS" $ msls iters gr
   ,mutateLS 2
   ,mutateLS 3
   ,mutateLS 4
@@ -819,18 +819,18 @@ experiments gr = sequence [
     mutateLS mSize =
       collectExperiments numRuns
       ("Mutate LS " ++ (show mSize) ++ "pts")
-      $ mutateLocalSearch 5 mSize gr
+      $ mutateLocalSearch iters mSize gr
       
     genLS genSize =
       collectExperiments numRuns
       ("Genetic LS (" ++ (show (genSize :: Int)) ++ ")")
-      $ geneticLocalSearch genSize 5 gr
+      $ geneticLocalSearch genSize iters gr
       
     pCXLS genSize =
       collectExperiments numRuns
       ("Power Crossover LS ("
        ++ (show (genSize :: Int)) ++ ")")
-      $ pCXSearch genSize 5 gr
+      $ pCXSearch genSize iters gr
 
 mainRunner graph out = do
   
