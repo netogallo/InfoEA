@@ -799,7 +799,7 @@ collectExperiments num name expr = do
   return res
          
 
-numRuns = 1
+numRuns = 5
 iters = 250
 
 experiments :: Vector (Vector Int) -> IO [Results (Vector Bool)]
