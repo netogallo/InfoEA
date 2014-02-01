@@ -717,8 +717,7 @@ runExperiment :: (Show a, Eq a, Hashable a, RandomGen t,Random a) =>
 runExperiment size bsSize env g  =
   runST $ liftM fst $ (runRandT (runExperimentM env size bsSize) g) 
 
-benchmarkExperiment exp = do
-  gen <- getStdGen
+benchmarkExperiment gen exp = do
   t0 <- getCurrentTime
   let
     res = exp gen
@@ -794,7 +793,9 @@ pCXSearch size num gr gen =
   runExperiment size (V.length gr) (genLSEnv num gr) gen
 
 collectExperiments num name expr = do
-  res <- liftM (Results name) $ mapM (const $ benchmarkExperiment expr) [1..num]
+  gen <- getStdGen
+  gens <- mapM (const $ liftM mkStdGen getRandom) [1..num]
+  res <- liftM (Results name) $ mapM (\g -> benchmarkExperiment g expr) gens
   BS.hPutStr stdout (A.encode res) >> BS.hPutStr stdout "\n" >> hFlush stdout
   return res
          
